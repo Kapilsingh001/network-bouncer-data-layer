@@ -533,8 +533,12 @@ def main() -> None:
             st.warning(w)
         return
 
-    for w in result.warnings:
-        st.caption(f"⚠️ {w}")
+    # Schema notes are informational (e.g. extra UNSW-NB15 columns ignored).
+    # Tuck them inside a collapsed expander so they never read as an error.
+    if result.warnings:
+        with st.expander(f"ℹ️ {len(result.warnings)} schema note(s)", expanded=False):
+            for w in result.warnings:
+                st.caption(w)
 
     # Route to the right dashboard based on the auto-detected file format.
     if result.mode == "flow":

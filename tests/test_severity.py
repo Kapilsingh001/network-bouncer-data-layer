@@ -32,12 +32,21 @@ def test_clean_host_is_none():
     assert result.severity_score == 0.0
 
 
-def test_rule_only_host_gets_tier():
-    # suspicion_score 5 -> 25 points -> Medium (>= medium_threshold 25).
-    result = CLF.classify_row(_row(is_suspicious=True, suspicion_score=5.0, rule_hits=3,
-                                   triggered_rules=["horizontal_scan"]))
+def test_single_rule_gets_meaningful_tier():
+    # A single high_port_diversity hit (weight 1.5) -> 1.5*18 = 27 pts -> Medium,
+    # not a trivial "Low". This is the calibration the reviewer flagged.
+    result = CLF.classify_row(_row(is_suspicious=True, suspicion_score=1.5, rule_hits=1,
+                                   triggered_rules=["high_port_diversity"]))
     assert result.severity_level == "Medium"
+    assert result.severity_score >= 25
     assert any("Rule-based detection" in r for r in result.severity_explanation)
+
+
+def test_block_scan_is_high():
+    # A block scan alone (weight 3.0) -> 3.0*18 = 54 pts -> High (was "Low" before).
+    result = CLF.classify_row(_row(is_suspicious=True, suspicion_score=3.0, rule_hits=1,
+                                   triggered_rules=["block_scan"]))
+    assert result.severity_level == "High"
 
 
 def test_corroborated_escalates_to_critical():
@@ -79,8 +88,8 @@ def test_classify_dataframe_schema():
 def test_thresholds_are_configurable():
     cfg = ScoringConfig(medium_threshold=10, high_threshold=20, critical_threshold=30)
     clf = SeverityClassifier(cfg)
-    # suspicion 5 -> 25 points -> now High (>=20) under the stricter policy.
-    result = clf.classify_row(_row(is_suspicious=True, suspicion_score=5.0, rule_hits=2))
+    # suspicion 1.5 -> 27 points -> High (>=20, <30) under this stricter policy.
+    result = clf.classify_row(_row(is_suspicious=True, suspicion_score=1.5, rule_hits=1))
     assert result.severity_level == "High"
 
 

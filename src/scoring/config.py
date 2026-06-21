@@ -68,8 +68,18 @@ class ScoringConfig:
     min_population: int = 5
 
     # Severity scoring weights (points-based, 0..score_cap).
-    rule_weight: float = 5.0
-    rule_points_cap: float = 50.0
+    #
+    # rule_weight is calibrated against the Dev 2 rule weights so a SINGLE fired
+    # rule already lands in a meaningful tier (rather than a trivial "Low"):
+    #     behavioural single (w=1.0) -> 18 pts  -> Low
+    #     high_port_diversity (w=1.5) -> 27 pts -> Medium
+    #     horizontal / vertical (w=2.0) -> 36 pts -> Medium
+    #     block_scan          (w=3.0) -> 54 pts -> High
+    #     two strong rules    (w>=2.8) -> 50-60 pts -> High
+    # Rules alone cap below the Critical threshold (75): Critical requires
+    # statistical corroboration (the escalation path or anomaly points on top).
+    rule_weight: float = 18.0
+    rule_points_cap: float = 60.0
     anomaly_indicator_points: float = 10.0
     zscore_points: float = 2.0
     anomaly_points_cap: float = 50.0

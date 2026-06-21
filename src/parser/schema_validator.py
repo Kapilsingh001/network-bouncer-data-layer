@@ -115,9 +115,18 @@ def validate_schema(
         result.add_error(f"Missing required column(s): {missing}")
 
     # 3. Unexpected columns -> warning only (extra capture fields are allowed).
+    # Datasets like the full UNSW-NB15 capture carry 40+ extra feature columns;
+    # dumping every name reads as an error to a non-expert. Summarise instead:
+    # a count plus a short preview keeps it informative but reassuring.
     unexpected = sorted(actual_cols - {c.lower() for c in expected})
     if unexpected:
-        result.add_warning(f"Unexpected column(s) present (ignored downstream): {unexpected}")
+        n = len(unexpected)
+        preview = ", ".join(unexpected[:5])
+        more = f", +{n - 5} more" if n > 5 else ""
+        result.add_warning(
+            f"{n} additional dataset column(s) detected and ignored - "
+            f"analysis uses the required columns ({preview}{more})."
+        )
 
     if result.is_valid:
         logger.info("Schema validation passed (%d warning(s))", len(result.warnings))
