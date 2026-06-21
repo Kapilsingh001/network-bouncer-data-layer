@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.parser.csv_loader import CSVLoadError, load_csv
+from src.parser.csv_loader import CSVLoadError, load_csv, load_raw_csv
+from src.utils.constants import UNSW_RAW_COLUMNS
 
 
 def test_load_valid_csv(csv_file):
@@ -45,3 +46,20 @@ def test_header_only_raises(tmp_path):
 def test_usecols_subset(csv_file):
     df = load_csv(csv_file, usecols=["srcip", "dstip"])
     assert list(df.columns) == ["srcip", "dstip"]
+
+
+def test_load_raw_headerless_unsw(tmp_path):
+    # A headerless raw UNSW-NB15-style row (49 columns).
+    row = ["59.166.0.5", "1390", "149.171.126.6", "53", "udp", "CON"] + ["0"] * 43
+    assert len(row) == len(UNSW_RAW_COLUMNS)
+    row[13] = "dns"          # service column
+    row[47] = "-"            # attack_cat
+    row[48] = "0"            # label
+    raw = tmp_path / "raw.csv"
+    raw.write_text(",".join(row) + "\n")
+
+    df = load_raw_csv(str(raw))
+    assert list(df.columns) == UNSW_RAW_COLUMNS
+    assert df.iloc[0]["srcip"] == "59.166.0.5"
+    assert df.iloc[0]["dsport"] == 53
+    assert df.iloc[0]["proto"] == "udp"

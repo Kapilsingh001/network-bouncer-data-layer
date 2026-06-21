@@ -124,7 +124,7 @@ Cleaning order is deliberate (`cleaner.py`). For every step:
 | Null destination IP | Rows with no `dstip` | Scanning = one src → many dsts | Destroys `unique_destinations` signal |
 | Null ports | Rows with non-numeric/missing `sport`/`dsport` | Ports must be integers to be counted | Cannot range-check or count |
 | Invalid port range | Ports outside `1–65535` (incl. port 0) | Corruption / reserved sentinels | Keeps per-port counts meaningful |
-| Invalid protocol | `proto` not in known set | Corrupt row, pollutes distribution | Keeps protocol distribution honest |
+| Blank/null protocol | rows whose `proto` is missing/empty | A missing protocol can't be reasoned about | Protocols are **not** whitelisted — every protocol value present (tcp, udp, arp, ospf, sctp, …) is preserved for UNSW-NB15 |
 | Duplicate rows | Exact duplicates | Inflate connection counts | Fabricates scan intensity that never occurred |
 
 > **Why drop instead of impute?** Imputation invents plausible attack signal.

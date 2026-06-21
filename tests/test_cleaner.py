@@ -28,6 +28,25 @@ def test_clean_removes_all_defects(dirty_records):
     assert len(clean_df) == 1
 
 
+def test_unusual_protocols_are_preserved():
+    # Protocols are NOT whitelisted: uncommon-but-valid protocols (as found in
+    # UNSW-NB15) must survive cleaning. Only blank/null protocols are dropped.
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "srcip": ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"],
+            "dstip": ["10.0.0.9", "10.0.0.9", "10.0.0.9", "10.0.0.9"],
+            "sport": [1024, 1025, 1026, 1027],
+            "dsport": [80, 80, 80, 80],
+            "proto": ["arp", "ospf", "sctp", "gre"],
+        }
+    )
+    clean_df, stats = clean_data(df)
+    assert stats.invalid_proto_removed == 0
+    assert set(clean_df["proto"]) == {"arp", "ospf", "sctp", "gre"}
+
+
 def test_clean_keeps_valid_rows(clean_records):
     clean_df, stats = clean_data(clean_records)
     assert stats.final_rows == len(clean_records)

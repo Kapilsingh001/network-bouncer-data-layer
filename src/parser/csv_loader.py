@@ -19,6 +19,7 @@ from typing import Iterable, Optional
 import pandas as pd
 from pandas.errors import EmptyDataError, ParserError
 
+from src.utils.constants import UNSW_RAW_COLUMNS
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,7 +49,9 @@ def load_csv(
     *,
     chunksize: Optional[int] = None,
     usecols: Optional[Iterable[str]] = None,
-    encoding: str = "utf-8",
+    encoding: str = "utf-8-sig",
+    names: Optional[list] = None,
+    header: "str | int | None" = "infer",
 ) -> pd.DataFrame:
     """Load a CSV file into a pandas DataFrame.
 
@@ -63,7 +66,16 @@ def load_csv(
         Optional subset of columns to read. Reading only what you need is the
         single biggest speed/memory win on wide files.
     encoding:
-        Text encoding of the file (defaults to UTF-8).
+        Text encoding of the file (defaults to UTF-8, BOM-tolerant). The
+        ``-sig`` variant transparently strips a leading UTF-8 BOM, which some
+        UNSW-NB15 exports include and which would otherwise corrupt the first
+        column name (e.g. ``"﻿id"`` instead of ``"id"``).
+    names:
+        Explicit column names. Required for headerless files (raw UNSW-NB15).
+        When supplied, pass ``header=None``.
+    header:
+        Row number(s) to use as column names, or ``None`` for headerless files.
+        Defaults to ``"infer"`` (normal CSV with a header row).
 
     Returns
     -------
@@ -90,6 +102,8 @@ def load_csv(
         dtype=_resolve_dtypes(usecols),
         usecols=list(usecols) if usecols else None,
         encoding=encoding,
+        names=names,
+        header=header,
         # Quietly tolerate occasional malformed rows instead of aborting the
         # whole load; the data-quality stage accounts for what was dropped.
         on_bad_lines="warn",
@@ -120,6 +134,23 @@ def load_csv(
 
     logger.info("Loaded %d rows x %d columns", len(df), df.shape[1])
     return df
+
+
+def load_raw_csv(
+    file_path: str,
+    *,
+    names: Optional[list] = None,
+    **kwargs,
+) -> pd.DataFrame:
+    """Load a headerless raw UNSW-NB15 capture file (UNSW-NB15_1..4.csv).
+
+    These files ship without a header row, so we assign the official column
+    order (:data:`src.utils.constants.UNSW_RAW_COLUMNS`). The returned frame has
+    the same ``srcip``/``dstip``/``sport``/``dsport``/``proto`` columns the rest
+    of the pipeline expects.
+    """
+    names = names or UNSW_RAW_COLUMNS
+    return load_csv(file_path, names=names, header=None, **kwargs)
 
 
 def _resolve_dtypes(usecols: Optional[Iterable[str]]) -> dict:

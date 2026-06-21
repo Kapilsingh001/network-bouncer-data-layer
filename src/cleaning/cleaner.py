@@ -11,7 +11,7 @@ Cleaning pipeline (order matters)
 3. Drop rows with null destination IP.
 4. Coerce ports to integers; drop rows with null ports.
 5. Drop rows with out-of-range ports (not in 1..65535).
-6. Drop rows with invalid/unknown protocol values.
+6. Drop rows with blank/null protocol values (protocols are NOT whitelisted).
 7. Drop exact duplicate rows.
 
 Why drop instead of impute?
@@ -34,7 +34,6 @@ from src.utils.constants import (
     MIN_PORT,
     NULL_TOKENS,
     PORT_COLUMNS,
-    VALID_PROTOCOLS,
 )
 from src.utils.logger import get_logger
 
@@ -123,9 +122,11 @@ def clean_data(df: pd.DataFrame) -> tuple[pd.DataFrame, CleaningStats]:
     df = _filter_port_ranges(df)
     stats.invalid_port_removed = before - len(df)
 
-    # --- Step 6: invalid protocol values -----------------------------------
-    # WHY: an unrecognised protocol token signals a corrupt row and pollutes
-    # protocol distribution. IMPACT: drop rows whose proto is not a known token.
+    # --- Step 6: blank/null protocol values --------------------------------
+    # WHY: a missing protocol cannot be reasoned about and pollutes protocol
+    # distribution. We deliberately do NOT whitelist protocols — UNSW-NB15 and
+    # real captures contain many valid L3/L4 protocols. IMPACT: drop only rows
+    # whose protocol is null/blank; preserve every protocol token that is present.
     if "proto" in df.columns:
         before = len(df)
         df = _filter_protocols(df)
@@ -222,6 +223,12 @@ def _filter_port_ranges(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filter_protocols(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only rows with a recognised protocol token (case-insensitive)."""
-    proto = df["proto"].astype("object").str.strip().str.lower()
-    return df[proto.isin(VALID_PROTOCOLS)]
+    """Keep rows whose protocol is present (not null/blank).
+
+    Protocol values are NOT whitelisted: real datasets such as UNSW-NB15 contain
+    many legitimate L3/L4 protocols (arp, ospf, sctp, gre, ...), and restricting
+    to a fixed set would silently discard valid traffic. We therefore only drop
+    rows whose protocol is missing or empty.
+    """
+    proto = df["proto"].astype("object").str.strip()
+    return df[proto.notna() & (proto != "")]
