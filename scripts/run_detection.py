@@ -25,8 +25,8 @@ from src.cleaning.cleaner import clean_data
 from src.cleaning.data_quality import build_quality_report
 from src.analyzer.profiler import profile_dataset
 from src.detection.detector import RuleBasedDetector
-from src.parser.csv_loader import load_csv, load_raw_csv
-from src.parser.schema_validator import validate_schema
+from src.parser.csv_loader import CSVLoadError, load_csv, load_raw_csv
+from src.parser.schema_validator import SchemaValidationError, validate_schema
 
 
 def main() -> None:
@@ -40,9 +40,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 1. Load + 2. Validate (fail fast on missing required columns / empty data)
-    df = load_raw_csv(args.csv) if args.raw else load_csv(args.csv)
-    validate_schema(df).raise_if_invalid()
+    # 1. Load + 2. Validate. Fail with a clean message (not a traceback) on bad
+    # input — this runner is part of the resilience story too.
+    try:
+        df = load_raw_csv(args.csv) if args.raw else load_csv(args.csv)
+        validate_schema(df).raise_if_invalid()
+    except CSVLoadError as exc:
+        print(f"[ERROR] Could not load CSV: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except SchemaValidationError as exc:
+        print(f"[ERROR] Schema validation failed: {exc}", file=sys.stderr)
+        if not args.raw:
+            print("        If this is a headerless raw UNSW-NB15 file, re-run with --raw.",
+                  file=sys.stderr)
+        sys.exit(3)
 
     # 3. Clean (and show exactly what the dirt cost us)
     clean_df, stats = clean_data(df)
