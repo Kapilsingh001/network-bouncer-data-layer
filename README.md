@@ -1,220 +1,384 @@
-# Network Bouncer — Data Layer
+# 🛡️ The Network Bouncer
 
 **Detecting Suspicious Port Scanning in Data-Center Traffic**
-*Developer 1 (Data Engineer) — Data Layer ownership*
 
-This package owns the full journey from a raw CSV upload to a clean, validated,
-**feature-ready dataset**. Detection logic, severity scoring, dashboard and
-reporting are owned by other team members and consume the artifacts produced
-here.
+When a server in a data center is compromised, one of its first moves is to
+*scan* — reach out to many machines and many ports looking for a way in. The
+Network Bouncer reads network-traffic logs (UNSW-NB15 CSVs), learns how each
+machine normally behaves, and flags the ones that look like they're scanning —
+with an explainable severity score a SOC analyst can act on.
+
+```bash
+python network_bouncer.py traffic.csv
+```
+
+```
+============================================================
+  NETWORK BOUNCER - Port-Scan Detection Report
+============================================================
+Flagged hosts       : 3 of 28
+Severity breakdown  : Critical=2  High=1  Medium=0  Low=0
+
+Suspicious Activity Detected:
+Source IP          : 175.45.176.1
+Connections        : 50
+Unique Destinations: 1
+Unique Ports       : 50
+Detection Status   : Suspicious (Backdoor/Analysis)
+Severity Level     : Critical (score 100/100)
+```
 
 ---
 
-## 1. Folder Structure
+## Table of Contents
 
-```
-.
-├── src/
-│   ├── __init__.py            # Public API re-exports (load_csv, clean_data, ...)
-│   ├── pipeline.py            # End-to-end orchestrator: load→validate→clean→profile→features
-│   │
-│   ├── parser/
-│   │   ├── csv_loader.py      # load_csv(): robust, memory-efficient CSV ingestion
-│   │   └── schema_validator.py# validate_schema(): required-column / empty-data checks
-│   │
-│   ├── cleaning/
-│   │   ├── cleaner.py         # clean_data(): nulls, dupes, port ranges, bad protocols
-│   │   └── data_quality.py    # build/write quality_report.json
-│   │
-│   ├── analyzer/
-│   │   ├── profiler.py        # profile_dataset(): JSON dataset summary
-│   │   └── aggregator.py      # build_host_features(): one row per source IP
-│   │
-│   └── utils/
-│       ├── logger.py          # Centralised, consistently-formatted logger
-│       └── constants.py       # Single source of truth for schema + valid ranges
-│
-├── tests/
-│   ├── conftest.py            # Shared fixtures (clean + dirty datasets)
-│   ├── test_csv_loader.py
-│   ├── test_schema_validator.py
-│   ├── test_cleaner.py
-│   └── test_aggregator.py
-│
-├── requirements.txt
-├── pytest.ini
-└── README.md
-```
+1. [Project Overview](#1-project-overview)
+2. [Architecture](#2-architecture)
+3. [Folder Structure](#3-folder-structure)
+4. [Installation](#4-installation)
+5. [How to Run](#5-how-to-run)
+6. [Example Dataset](#6-example-dataset)
+7. [Detection Logic](#7-detection-logic)
+8. [Screenshots](#8-screenshots)
+9. [Future Improvements](#9-future-improvements)
 
-### Purpose of every file
+---
 
-| File | Responsibility |
-|------|----------------|
-| `utils/logger.py` | One singleton logger, no duplicate handlers; every stage logs in the same format so runs are greppable. |
-| `utils/constants.py` | Expected/required columns, valid port range (1–65535), known protocols, null sentinels. Change the schema in one place. |
-| `parser/csv_loader.py` | Gets bytes off disk into a typed DataFrame. Validates existence/format, supports chunked reads + categorical dtypes for large files. |
-| `parser/schema_validator.py` | Structural gate: required columns present, dataset non-empty. Returns a `ValidationResult` (errors vs. warnings). |
-| `cleaning/cleaner.py` | The data-quality engine. Removes/repairs the six defect classes and **counts every removal**. |
-| `cleaning/data_quality.py` | Turns cleaning counts into `quality_report.json`. |
-| `analyzer/profiler.py` | At-a-glance JSON summary: volumes, cardinalities, distributions, missing-value stats. |
-| `analyzer/aggregator.py` | `build_host_features(df)` — the hand-off table to the detection team. |
-| `pipeline.py` | Wires all six stages and returns every artifact. Also a runnable CLI. |
+## 1. Project Overview
+
+| | |
+|---|---|
+| **Problem** | Detect port-scanning / reconnaissance in data-center east-west traffic. |
+| **Input** | UNSW-NB15 network-traffic CSVs. |
+| **Output** | A ranked list of suspicious machines (or flows), each with a severity score and a plain-English reason. |
+| **Approach** | Rule-based detection + statistical anomaly scoring — **simple, fast, and explainable** (no black-box ML). |
+| **Interfaces** | A CLI (`network_bouncer.py`) **and** an interactive Streamlit dashboard. |
+
+### Why two detection modes?
+
+UNSW-NB15 ships in **two very different shapes**, and the tool auto-detects which
+one you gave it — so the same command works on both:
+
+| Dataset file | Has source/dest IP + ports? | Mode used |
+|---|---|---|
+| `UNSW-NB15_1..4.csv` (raw capture) | ✅ Yes | **Host-based** — aggregates behaviour *per machine* (strong) |
+| `UNSW_NB15_training/testing-set.csv` (ML feature set) | ❌ No (stripped) | **Flow-level** — scores each flow (fallback) |
+
+> Host-based is the stronger detector because port scanning is *defined* by one
+> machine touching many destinations/ports — which needs host identity. When a
+> file has no IPs, the tool transparently falls back to flow-level detection
+> instead of failing.
 
 ---
 
 ## 2. Architecture
 
-The data layer is a **linear, single-responsibility pipeline**. Each stage has
-one job, is independently testable, and never reaches into another stage's
-concerns:
+A **linear, single-responsibility pipeline**. Each stage has one job and is
+independently testable:
 
 ```
- CSV file
-    │
-    ▼
-┌───────────────┐   load_csv()         existence, format, encoding, chunking
-│   1. LOAD     │ ─────────────────►   → pandas.DataFrame (typed)
-└───────────────┘
-    │
-    ▼
-┌───────────────┐   validate_schema()  required cols? empty? unknown cols?
-│  2. VALIDATE  │ ─────────────────►   → ValidationResult (fail fast)
-└───────────────┘
-    │
-    ▼
-┌───────────────┐   clean_data()       nulls, dupes, port ranges, protocols
-│   3. CLEAN    │ ─────────────────►   → clean DataFrame + CleaningStats
-└───────────────┘
-    │
-    ├──────────────► data_quality → quality_report.json
-    │
-    ▼
-┌───────────────┐   profile_dataset()  totals, cardinalities, distributions
-│  4. PROFILE   │ ─────────────────►   → profile JSON
-└───────────────┘
-    │
-    ▼
-┌───────────────┐   build_host_features()  one row per source IP
-│ 5. AGGREGATE  │ ─────────────────────►   → feature DataFrame  ──► DETECTION TEAM
-└───────────────┘
+              ┌─────────────────────────────────────────────────────────┐
+              │                      CSV upload                          │
+              └─────────────────────────────────────────────────────────┘
+                                        │
+                          ┌─────────────┴─────────────┐
+                          ▼                           ▼
+                  load_csv()                  format_detector.py
+                  (parser/)                   "host" or "flow"?
+                          │                           │
+                          ▼              ┌────────────┴────────────┐
+                  validate_schema()      ▼                         ▼
+                  (parser/)         HOST MODE                  FLOW MODE
+                          │              │                         │
+                          ▼              ▼                         ▼
+                  clean_data()    build_host_feature_matrix   detect_flow_anomalies
+                  (cleaning/)     (features/)                 (detection/flow_detector)
+                          │              │                         │
+                          ▼              ▼                         │
+                  profile_dataset  RuleBasedDetector              │
+                  (analyzer/)      (detection/)                   │
+                          │              │                         │
+                          │              ▼                         │
+                          │       enrich_detections               │
+                          │       (scoring/: anomaly + severity)   │
+                          └──────────────┼─────────────────────────┘
+                                         ▼
+                            CLI report  +  Streamlit dashboard
+                            (network_bouncer.py / dashboard/)
+                            + CSV / JSON / TXT exports
 ```
 
 **Design principles**
 
 - **Fail fast, fail loud.** Bad input raises typed exceptions (`CSVLoadError`,
-  `SchemaValidationError`) at the earliest possible stage.
-- **Drop, never fabricate.** For a security detector, an invented IP or port
-  can manufacture or mask attack signal. Every removal is a deliberate,
-  *audited* drop surfaced in `quality_report.json`.
-- **Configuration in one place.** `utils/constants.py` is the single source of
-  truth shared by every stage.
-- **Pure functions, no hidden state.** Cleaning copies its input; nothing
-  mutates the caller's DataFrame.
+  `SchemaValidationError`) at the earliest stage.
+- **Drop, never fabricate.** For a security detector, an invented IP or port can
+  manufacture or mask attack signal. Every removal is counted in
+  `quality_report.json`.
+- **Explainable by construction.** Every alert traces back to the concrete
+  numbers and named rules that triggered it.
+- **Configuration in one place.** Thresholds live in `*/config.py` /
+  `utils/constants.py`, tunable without touching logic.
 
 ---
 
-## 3. Data Cleaning — design decisions
+## 3. Folder Structure
 
-Cleaning order is deliberate (`cleaner.py`). For every step:
-
-| Step | What is removed | Why | Impact on analysis |
-|------|-----------------|-----|--------------------|
-| Normalise null tokens | `"-"`, `"na"`, `"?"`, `""` → `NaN` | Captures encode "missing" many ways | Makes null checks catch every variant |
-| Null source IP | Rows with no `srcip` | Cannot attribute a scan to a host | Row is useless for per-source aggregation |
-| Null destination IP | Rows with no `dstip` | Scanning = one src → many dsts | Destroys `unique_destinations` signal |
-| Null ports | Rows with non-numeric/missing `sport`/`dsport` | Ports must be integers to be counted | Cannot range-check or count |
-| Invalid port range | Ports outside `1–65535` (incl. port 0) | Corruption / reserved sentinels | Keeps per-port counts meaningful |
-| Blank/null protocol | rows whose `proto` is missing/empty | A missing protocol can't be reasoned about | Protocols are **not** whitelisted — every protocol value present (tcp, udp, arp, ospf, sctp, …) is preserved for UNSW-NB15 |
-| Duplicate rows | Exact duplicates | Inflate connection counts | Fabricates scan intensity that never occurred |
-
-> **Why drop instead of impute?** Imputation invents plausible attack signal.
-> A missing value is honestly missing; a fabricated source IP is a lie the
-> detector would act on. Hence: count and drop, never guess.
+```
+.
+├── network_bouncer.py          # ⭐ Main CLI entry point (auto-detects format)
+│
+├── src/
+│   ├── parser/
+│   │   ├── csv_loader.py        # Robust, memory-efficient CSV ingestion
+│   │   ├── schema_validator.py  # Required-column / empty-data checks
+│   │   └── format_detector.py   # Host vs flow dataset auto-detection
+│   ├── cleaning/
+│   │   ├── cleaner.py           # Nulls, dupes, port ranges, bad protocols
+│   │   └── data_quality.py      # quality_report.json
+│   ├── analyzer/
+│   │   ├── profiler.py          # Dataset summary (volumes, distributions)
+│   │   └── aggregator.py        # Per-source-IP raw counts
+│   ├── features/
+│   │   └── feature_builder.py   # Behavioural feature matrix (ratios)
+│   ├── detection/
+│   │   ├── rules.py             # The explainable rule set
+│   │   ├── detector.py          # Host-based RuleBasedDetector
+│   │   ├── flow_detector.py     # Flow-level fallback detector
+│   │   └── config.py            # Detection thresholds
+│   ├── scoring/
+│   │   ├── anomaly.py           # Statistical (z-score) outlier detection
+│   │   ├── severity.py          # Fused 0–100 severity + Low/Med/High/Critical
+│   │   ├── enricher.py          # Orchestrates anomaly + severity
+│   │   └── config.py            # Scoring weights & tier thresholds
+│   ├── utils/
+│   │   ├── logger.py            # Centralised logger
+│   │   └── constants.py         # Schema + valid ranges (single source of truth)
+│   └── pipeline.py              # Data-layer orchestrator
+│
+├── dashboard/                   # Streamlit SOC dashboard (Dev 4)
+│   ├── app.py                   # UI: overview, threat summary, tables, charts
+│   ├── pipeline_runner.py       # Runs the right pipeline for the uploaded file
+│   ├── charts.py                # Plotly visualisations
+│   └── exports.py               # CSV + executive-summary (TXT/JSON) reports
+│
+├── scripts/                     # Helper / sample-generation scripts
+├── docs/                        # Per-layer design docs
+├── tests/                       # 88 unit tests (pytest)
+├── requirements.txt
+└── README.md
+```
 
 ---
 
-## 4. Edge-case handling
+## 4. Installation
 
-| Edge case | Behaviour |
-|-----------|-----------|
-| **Empty CSV (0 bytes)** | `CSVLoadError("File is empty")` |
-| **Header-only CSV** | `CSVLoadError("CSV parsed to zero rows")` |
-| **Missing required columns** | `validate_schema` → fatal error; `raise_if_invalid()` raises `SchemaValidationError` |
-| **Unknown / extra columns** | Non-fatal **warning**; ignored downstream |
-| **Malformed rows** | `on_bad_lines="warn"` skips them; the data-quality report accounts for the final size |
-| **Invalid ports** (e.g. `70000`, `0`, `"0x1f"`) | Hex parsed; out-of-range dropped and counted |
-| **Wrong encoding** | `CSVLoadError` with the offending encoding named |
-| **Extremely large files** | `load_csv(path, chunksize=...)` bounds peak memory; IP/proto/service read as `category` dtype |
-| **Empty dataset to profiler/aggregator** | Returns a well-formed empty profile / empty feature frame — never crashes |
-
----
-
-## 5. Quick start
+Requires **Python 3.10+**.
 
 ```bash
+# 1. Clone
+git clone https://github.com/Kapilsingh001/network-bouncer-data-layer.git
+cd network-bouncer-data-layer
+
+# 2. (Recommended) create a virtual environment
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+
+# 3. Install dependencies
 pip install -r requirements.txt
+```
 
-# Run the whole pipeline from the CLI
-python -m src.pipeline traffic.csv --features-out host_features.csv --report-out quality_report.json
+Dependencies: `pandas`, `numpy` (core) · `streamlit`, `plotly` (dashboard) ·
+`pytest` (tests).
 
-# Run the tests
-pytest
+---
+
+## 5. How to Run
+
+### A) Command-line tool
+
+```bash
+# Simplest form — auto-detects the dataset format
+python network_bouncer.py traffic.csv
+
+# Raw headerless UNSW-NB15 capture (UNSW-NB15_1..4.csv)
+python network_bouncer.py UNSW-NB15_1.csv --raw
+
+# Write a CSV report and turn up sensitivity
+python network_bouncer.py traffic.csv --report flagged.csv --sensitivity high
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--raw` | Input is a headerless raw UNSW-NB15 capture (assigns the official column names). |
+| `--report PATH` | Write a CSV report of flagged hosts/flows. |
+| `--all` | Include *all* rows (not just suspicious) in the report. |
+| `--sensitivity {low,medium,high}` | Tune how aggressive detection is (default `medium`). |
+
+### B) Interactive dashboard
+
+```bash
+streamlit run dashboard/app.py
+```
+
+Then **upload a CSV** (or click *Load demo dataset*). The dashboard shows
+overview metrics, an executive threat summary, filterable host/flow tables,
+Plotly charts, and downloadable reports (**CSV, plus an Executive Summary in
+TXT/JSON**).
+
+### C) Run the tests
+
+```bash
+pytest            # 88 tests across parsing, cleaning, detection, scoring, exports
 ```
 
 ---
 
-## 6. Integration instructions (for the detection / dashboard / reporting team)
+## 6. Example Dataset
 
-**Option A — one call, all artifacts:**
+This project uses the **UNSW-NB15** dataset (Australian Centre for Cyber
+Security) — a standard benchmark of labelled normal + attack network flows.
 
-```python
-from src.pipeline import run_pipeline
+- 📥 **Download:** <https://www.kaggle.com/datasets/mrwellsdavid/unsw-nb15>
 
-result = run_pipeline("uploaded_traffic.csv")
+Two variants are supported automatically:
 
-result.clean_df          # cleaned, validated flows (pandas.DataFrame)
-result.features          # one row per source IP  ── feed to the scan detector
-result.profile           # dict  ── feed to the dashboard
-result.quality_report    # dict  ── feed to the reporting layer
-result.cleaning_stats    # CleaningStats dataclass
-```
+| File | Columns | Run with |
+|---|---|---|
+| `UNSW-NB15_1..4.csv` | Raw capture **with** `srcip, dstip, sport, dsport`, no header | `--raw` → host-based detection |
+| `UNSW_NB15_testing-set.csv` | ML feature set, **no IP/port** columns, has header | (no flag) → flow-level detection |
 
-**Option B — call individual stages:**
+The `attack_cat` / `label` columns, when present, are used **only** to *validate*
+the detector's accuracy (precision / recall / F1) — never as a detection input.
 
-```python
-from src import (
-    load_csv, validate_schema, clean_data,
-    profile_dataset, build_host_features, write_quality_report,
-)
-
-df = load_csv("traffic.csv")
-validate_schema(df).raise_if_invalid()
-clean_df, stats = clean_data(df)
-write_quality_report(stats, "quality_report.json")
-
-profile  = profile_dataset(clean_df)      # → dashboard
-features = build_host_features(clean_df)  # → detection
-```
-
-### The contract handed to the detection layer
-
-`build_host_features(df)` returns **one row per source IP** with a fixed,
-stable column order:
-
-```
-srcip,total_connections,unique_destinations,unique_ports,unique_protocols,unique_services
-192.168.1.10,50,50,50,2,1
-10.0.0.2,5,5,5,1,1
-```
-
-A high `unique_ports` / `unique_destinations` relative to `total_connections`
-is the port-scan fingerprint the detection team thresholds on.
+> Don't have the dataset handy? `python scripts/make_sample_data.py` generates a
+> small synthetic CSV, and the dashboard's **Load demo dataset** button builds a
+> population of benign hosts + injected scanners on the fly.
 
 ---
 
-## 7. Testing
+## 7. Detection Logic
 
-26 unit tests across loader, validation, cleaning, quality report, profiling
-and aggregation (`pytest`). Fixtures in `tests/conftest.py` provide a fully
-valid dataset and a "dirty" dataset containing exactly one of every defect
-class plus a duplicate, so each cleaning counter is asserted independently.
+Detection is **rule-based with a statistical second opinion** — deliberately
+simple and explainable, as the brief requires.
+
+### Step 1 — Behavioural features per host
+
+Raw counts scale with traffic volume (a busy server looks like a scanner), so we
+derive **volume-independent ratios** that isolate the *shape* of scanning:
+
+| Feature | What it captures |
+|---|---|
+| `unique_destinations`, `unique_dst_ports` | Breadth of contact |
+| `ports_per_destination` | Vertical-scan intensity |
+| `conn_per_destination` | Connection reuse (≈1 ⇒ a sweep) |
+| `dst_port_ratio` | Share of flows hitting a *fresh* port |
+| `null_service_ratio` | Probing ports with no listening service |
+| `incomplete_ratio` | Half-open / rejected connections |
+
+### Step 2 — Explainable rules
+
+Each rule is a small predicate that, when it fires, returns a human-readable
+reason. Every scan rule is gated on a minimum connection volume so quiet hosts
+can't trip on ratio noise.
+
+| Rule | Category | Fires when… |
+|---|---|---|
+| `block_scan` | block | Many ports **×** many destinations |
+| `horizontal_scan` | horizontal | One source → many destinations (sweep) |
+| `vertical_scan` | vertical | Many ports on **few** hosts (port sweep) |
+| `high_port_diversity` | behavioural | Almost every flow targets a fresh port |
+| `low_connection_reuse` | behavioural | Each destination touched ≈ once |
+| `unknown_service_probing` | behavioural | High share of flows to ports with no service |
+| `incomplete_connections` | behavioural | High share of half-open / rejected connections |
+
+### Step 3 — Statistical anomaly detection
+
+Independently, each host is z-scored against the population on every feature.
+A host that is ≥ 3σ above the mean on a feature is flagged as a statistical
+outlier — this catches scanners the fixed rules might miss.
+
+### Step 4 — Fused severity score (0–100)
+
+Rule evidence and statistical evidence are combined into one auditable score:
+
+```
+rule_points    = min(suspicion_score × 18,  60)
+anomaly_points = min(#indicators × 10 + (max_z − 3) × 2,  50)
+severity_score = min(rule_points + anomaly_points, 100)
+```
+
+| Score | Severity | Example |
+|---|---|---|
+| `0 – 20` | **Low** | A single weak behavioural signal |
+| `20 – 50` | **Medium** | `high_port_diversity` (27), a horizontal/vertical sweep (36) |
+| `50 – 80` | **High** | A block scan (54), two strong rules |
+| `80 +` | **Critical** | Strong rules **corroborated** by statistical outliers |
+
+> Rules alone cap at 60 points, so **Critical always requires independent
+> statistical corroboration** — which keeps the top tier meaningful rather than
+> handed out for one noisy rule.
+
+### Handling false positives
+
+The brief calls out high-traffic servers looking suspicious. Mitigations:
+volume gating, **ratio-based** (not count-based) features, configurable
+`--sensitivity` presets, and a fused score that needs corroboration for the
+highest tiers.
+
+---
+
+## 8. Screenshots
+
+> Dashboard screenshots live in [`docs/screenshots/`](docs/screenshots/).
+> _(Add your PNGs there with these names and they'll render below.)_
+
+**Overview & threat summary**
+
+![Dashboard overview](docs/screenshots/dashboard-overview.png)
+
+**Suspicious hosts / flows table**
+
+![Suspicious table](docs/screenshots/suspicious-table.png)
+
+**Visualisations**
+
+![Charts](docs/screenshots/charts.png)
+
+**CLI output**
+
+![CLI report](docs/screenshots/cli-output.png)
+
+---
+
+## 9. Future Improvements
+
+- **Time-window detection** — bucket flows into short windows so scans are
+  caught by *burst rate*, not just totals (the dataset's per-flow rows have no
+  reliable timestamp today).
+- **Severity tuning UI** — expose detection/scoring thresholds as dashboard
+  sliders for live what-if analysis.
+- **Lightweight ML option** — add an optional IsolationForest / logistic model
+  alongside the rules, with the rules as the explainable baseline.
+- **More attack patterns** — DoS, brute-force and exfiltration signatures beyond
+  port scanning.
+- **Streaming / chunked mode** — process arbitrarily large captures with bounded
+  memory end-to-end (the loader already supports chunked reads).
+- **Alert integrations** — push Critical/High findings to Slack / email / SIEM.
+
+---
+
+## Testing
+
+**88 unit tests** (`pytest`) span CSV loading, schema validation, cleaning,
+profiling, feature engineering, the rule engine, statistical anomaly detection,
+severity scoring, format detection and report exports. Fixtures provide a fully
+valid dataset and a "dirty" dataset containing exactly one of every defect class,
+so each behaviour is asserted independently.
+
+```bash
+pytest -q
+```
