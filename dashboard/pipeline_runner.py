@@ -24,7 +24,11 @@ from src.cleaning.cleaner import clean_data
 from src.cleaning.data_quality import build_quality_report
 from src.detection.config import DetectionConfig
 from src.detection.detector import RuleBasedDetector
-from src.detection.flow_detector import compute_flow_metrics, detect_flow_anomalies
+from src.detection.flow_detector import (
+    FlowDetectionConfig,
+    compute_flow_metrics,
+    detect_flow_anomalies,
+)
 from src.parser.schema_validator import validate_schema
 from src.scoring.enricher import enrich_detections
 from src.utils.constants import UNSW_RAW_COLUMNS
@@ -35,6 +39,15 @@ SENSITIVITY_PRESETS: dict[str, dict] = {
     "High (more alerts)": dict(min_connections=5, horizontal_min_destinations=10, min_rules_to_flag=1),
 }
 DEFAULT_SENSITIVITY = "Medium (balanced)"
+
+# Flow-mode equivalent: how many probe indicators a single flow must show to be
+# flagged. Lower = more aggressive = more flags. Keeps the sensitivity slider
+# meaningful for feature-set files (which have no host identity to aggregate).
+FLOW_SENSITIVITY_INDICATORS: dict[str, int] = {
+    "Low (fewer alerts)": 4,
+    "Medium (balanced)": 3,
+    "High (more alerts)": 2,
+}
 
 # Column sets used for schema auto-detection.
 _HOST_COLUMNS = {"srcip", "dstip", "sport", "dsport"}
@@ -107,10 +120,12 @@ def run_full_pipeline(df: pd.DataFrame, sensitivity: str = DEFAULT_SENSITIVITY) 
 # --------------------------------------------------------------------------- #
 # Flow-level pipeline (files without host/port columns)
 # --------------------------------------------------------------------------- #
-def run_flow_pipeline(df: pd.DataFrame) -> AnalysisResult:
+def run_flow_pipeline(df: pd.DataFrame, sensitivity: str = DEFAULT_SENSITIVITY) -> AnalysisResult:
     """Run flow-level reconnaissance detection on a feature-set DataFrame."""
     try:
-        verdict = detect_flow_anomalies(df)
+        config = FlowDetectionConfig(
+            min_indicators=FLOW_SENSITIVITY_INDICATORS.get(sensitivity, 3))
+        verdict = detect_flow_anomalies(df, config)
         metrics = compute_flow_metrics(verdict)
         flagged = int(verdict["flow_is_suspicious"].sum())
         profile = _flow_profile(df)
@@ -145,7 +160,7 @@ def run_from_bytes(
     if mode == "host":
         return run_full_pipeline(df, sensitivity)
     if mode == "flow":
-        return run_flow_pipeline(df)
+        return run_flow_pipeline(df, sensitivity)
 
     # Last resort: maybe it is a headerless raw UNSW capture.
     raw = _try_read(file_bytes, raw=True)
