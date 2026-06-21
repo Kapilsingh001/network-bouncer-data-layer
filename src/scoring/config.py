@@ -85,10 +85,11 @@ class ScoringConfig:
     anomaly_points_cap: float = 50.0
     score_cap: float = 100.0
 
-    # Severity tier cut-points.
-    medium_threshold: float = 25.0
+    # Severity tier cut-points (0..score_cap). Round, analyst-friendly bands:
+    #     0-20 Low | 20-50 Medium | 50-80 High | 80+ Critical
+    medium_threshold: float = 20.0
     high_threshold: float = 50.0
-    critical_threshold: float = 75.0
+    critical_threshold: float = 80.0
     critical_min_indicators: int = 3
 
     def __post_init__(self) -> None:

@@ -38,7 +38,7 @@ def test_single_rule_gets_meaningful_tier():
     result = CLF.classify_row(_row(is_suspicious=True, suspicion_score=1.5, rule_hits=1,
                                    triggered_rules=["high_port_diversity"]))
     assert result.severity_level == "Medium"
-    assert result.severity_score >= 25
+    assert result.severity_score >= 20  # clears the Medium band floor
     assert any("Rule-based detection" in r for r in result.severity_explanation)
 
 
